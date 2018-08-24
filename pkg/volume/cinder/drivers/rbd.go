@@ -116,7 +116,23 @@ func (d *RBDDriver) Format(volumeData map[string]interface{}, fsType string) err
 
 	mappedDeviceByte, err := exec.Command(rbdPath, "map", volume.Name).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("rbd map failed: %v", err)
+		// when we get status 22 (EINVAL), it might be because the volume has
+		// too many (>22) parent layers. Let's flatten it and try again.
+		if strings.Contains(err.Error(), "status 22") {
+			glog.Warningf("rbd map volume %s failed: %v. try to flatten it", volume.Name, err)
+			_, errFlatten := exec.Command(rbdPath, "flatten", volume.Name).CombinedOutput()
+			if errFlatten != nil {
+				glog.Warningf("rbd flatten volume %s failed: %v", volume.Name, errFlatten)
+				return fmt.Errorf("rbd map %s failed: %v", volume.Name, err)
+			}
+			mappedDeviceByte, err = exec.Command(rbdPath, "map", volume.Name).CombinedOutput()
+			if err != nil {
+				glog.Warningf("rbd map after flatten volume %s failed: %v", volume.Name, err)
+				return fmt.Errorf("rbd map %s failed: %v", volume.Name, err)
+			}
+		} else {
+			return fmt.Errorf("rbd map %s failed: %v", volume.Name, err)
+		}
 	}
 
 	mappedDevice := strings.TrimSpace(string(mappedDeviceByte))
@@ -124,7 +140,7 @@ func (d *RBDDriver) Format(volumeData map[string]interface{}, fsType string) err
 
 	deviceInfo, err := exec.Command(filePath, "-s", mappedDevice).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("rbd map failed: %v", err)
+		return fmt.Errorf("file -s on volume %s failed: %v", volume.Name, err)
 	}
 
 	if !strings.Contains(string(deviceInfo), fmt.Sprintf("%s filesystem", fsType)) {
